@@ -1,22 +1,30 @@
-import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-const ACCESS_COOKIE_NAME = "gdp_access";
+import { ACCESS_COOKIE_NAME } from "@/lib/constants";
 
 export function middleware(request: NextRequest) {
-  const token = request.cookies.get(ACCESS_COOKIE_NAME)?.value;
-  if (token) {
-    return NextResponse.next();
+  const { pathname } = request.nextUrl;
+  const hasAccessCookie = Boolean(request.cookies.get(ACCESS_COOKIE_NAME)?.value);
+
+  if (!hasAccessCookie && pathname.startsWith("/dashboard")) {
+    const redirectUrl = request.nextUrl.clone();
+    redirectUrl.pathname = "/";
+    redirectUrl.searchParams.set("paywall", "1");
+    return NextResponse.redirect(redirectUrl);
   }
 
-  if (request.nextUrl.pathname.startsWith("/api/check-domains")) {
-    return NextResponse.json({ error: "Paid access required." }, { status: 401 });
+  if (!hasAccessCookie && pathname === "/api/domain-check") {
+    return NextResponse.json(
+      {
+        error: "Payment required. Unlock access from the landing page first.",
+      },
+      { status: 402 },
+    );
   }
 
-  const landingUrl = new URL("/", request.url);
-  return NextResponse.redirect(landingUrl);
+  return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/api/check-domains/:path*"]
+  matcher: ["/dashboard/:path*", "/api/domain-check"],
 };

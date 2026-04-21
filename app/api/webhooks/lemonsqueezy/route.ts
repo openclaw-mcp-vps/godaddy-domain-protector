@@ -1,46 +1,44 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-import { upsertPurchase, verifyLemonSqueezyWebhook, type PurchaseRecord } from "@/lib/lemonsqueezy";
+import {
+  extractPayerEmail,
+  isRecognizedPaidEvent,
+  type StripeEventEnvelope,
+  verifyStripeWebhookSignature,
+} from "@/lib/lemonsqueezy";
+import { storeSuccessfulPayment } from "@/lib/database";
 
-type LemonWebhookPayload = {
-  meta?: {
-    event_name?: string;
-  };
-  data?: {
-    id?: string;
-    attributes?: {
-      user_email?: string;
-      refunded?: boolean;
-    };
-  };
-};
-
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   const rawBody = await request.text();
-  const signature = request.headers.get("x-signature");
+  const stripeSignature = request.headers.get("stripe-signature");
 
-  if (!verifyLemonSqueezyWebhook(rawBody, signature)) {
-    return NextResponse.json({ error: "Invalid webhook signature." }, { status: 401 });
+  if (!verifyStripeWebhookSignature(rawBody, stripeSignature)) {
+    return NextResponse.json({ error: "Invalid webhook signature." }, { status: 400 });
   }
 
-  const payload = JSON.parse(rawBody) as LemonWebhookPayload;
-  const eventName = payload.meta?.event_name;
-  const orderId = payload.data?.id;
-  const email = payload.data?.attributes?.user_email;
+  let event: StripeEventEnvelope;
 
-  if (!eventName || !orderId || !email) {
-    return NextResponse.json({ ok: true });
+  try {
+    event = JSON.parse(rawBody) as StripeEventEnvelope;
+  } catch {
+    return NextResponse.json({ error: "Malformed webhook payload." }, { status: 400 });
   }
 
-  const status: PurchaseRecord["status"] =
-    eventName === "order_refunded" || payload.data?.attributes?.refunded ? "refunded" : "paid";
+  if (!isRecognizedPaidEvent(event.type)) {
+    return NextResponse.json({ received: true, ignored: true });
+  }
 
-  await upsertPurchase({
-    orderId,
+  const email = extractPayerEmail(event);
+
+  if (!email) {
+    return NextResponse.json({ error: "Paid event did not contain customer email." }, { status: 422 });
+  }
+
+  await storeSuccessfulPayment({
     email,
-    createdAt: new Date().toISOString(),
-    status
+    eventId: event.id,
+    payload: event,
   });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ received: true, email });
 }
