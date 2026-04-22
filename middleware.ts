@@ -1,30 +1,31 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
-import { ACCESS_COOKIE_NAME } from "@/lib/constants";
+const ACCESS_COOKIE_NAME = "gdp_access";
+
+function isProtectedPath(pathname: string): boolean {
+  return pathname.startsWith("/dashboard") || pathname.startsWith("/api/check-domains");
+}
 
 export function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
-  const hasAccessCookie = Boolean(request.cookies.get(ACCESS_COOKIE_NAME)?.value);
-
-  if (!hasAccessCookie && pathname.startsWith("/dashboard")) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/";
-    redirectUrl.searchParams.set("paywall", "1");
-    return NextResponse.redirect(redirectUrl);
+  if (!isProtectedPath(request.nextUrl.pathname)) {
+    return NextResponse.next();
   }
 
-  if (!hasAccessCookie && pathname === "/api/domain-check") {
-    return NextResponse.json(
-      {
-        error: "Payment required. Unlock access from the landing page first.",
-      },
-      { status: 402 },
-    );
+  if (request.cookies.get(ACCESS_COOKIE_NAME)?.value) {
+    return NextResponse.next();
   }
 
-  return NextResponse.next();
+  if (request.nextUrl.pathname.startsWith("/api/check-domains")) {
+    return NextResponse.json({ error: "Payment required" }, { status: 402 });
+  }
+
+  const redirectUrl = request.nextUrl.clone();
+  redirectUrl.pathname = "/pricing";
+  redirectUrl.searchParams.set("from", request.nextUrl.pathname);
+
+  return NextResponse.redirect(redirectUrl);
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/api/domain-check"],
+  matcher: ["/dashboard/:path*", "/api/check-domains"]
 };

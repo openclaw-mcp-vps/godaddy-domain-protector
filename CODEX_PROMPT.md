@@ -4,30 +4,32 @@ Build a complete, production-ready Next.js 15 App Router application.
 
 PROJECT: godaddy-domain-protector
 HEADLINE: Check domain availability without registrar sniping
-WHAT: None
-WHY: None
-WHO PAYS: None
+WHAT: Anonymous domain availability checker that prevents registrars from sniping domains you search for. Uses proxy lookups and rotating IPs to hide your interest from domain registrars who track searches and preemptively register valuable domains.
+WHY: Domain registrars monitor WHOIS lookups and register domains that get searched frequently, forcing you to pay premium prices or lose the domain entirely. This practice costs entrepreneurs and businesses thousands when their ideal domain gets snatched after a simple availability check.
+WHO PAYS: Startup founders, domain investors, and marketing teams at growing companies who need to research domain options without alerting registrars. Anyone who's lost a perfect domain name after checking availability the 'normal' way.
 NICHE: domain-tools
 PRICE: $$7/mo
 
 ARCHITECTURE SPEC:
-A Next.js web app that checks domain availability through multiple registrars simultaneously while masking the user's IP and using rotating proxies to prevent domain sniping. Users can batch check domains, get real-time availability status, and receive alerts when domains become available.
+A Next.js web app with a proxy-based domain lookup service that rotates through multiple IP addresses and WHOIS providers to anonymously check domain availability. The backend uses a queue system to distribute lookups across different endpoints while the frontend provides a clean interface for bulk domain checking and results management.
 
 PLANNED FILES:
 - app/page.tsx
-- app/dashboard/page.tsx
 - app/api/check-domains/route.ts
 - app/api/webhooks/lemonsqueezy/route.ts
+- app/dashboard/page.tsx
+- app/pricing/page.tsx
 - components/domain-checker.tsx
-- components/domain-results.tsx
-- components/pricing-card.tsx
-- lib/domain-checker.ts
-- lib/proxy-rotation.ts
-- lib/lemonsqueezy.ts
+- components/results-table.tsx
+- components/pricing-cards.tsx
+- lib/domain-proxy.ts
+- lib/whois-providers.ts
 - lib/auth.ts
+- lib/lemonsqueezy.ts
+- lib/database.ts
 - middleware.ts
 
-DEPENDENCIES: next, tailwindcss, next-auth, prisma, @prisma/client, axios, cheerio, puppeteer, rotating-proxy, @lemonsqueezy/lemonsqueezy.js, zod, react-hook-form, lucide-react
+DEPENDENCIES: next, tailwindcss, @lemonsqueezy/lemonsqueezy.js, next-auth, @prisma/client, prisma, axios, cheerio, node-cron, ioredis, zod, lucide-react
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)
@@ -35,7 +37,7 @@ REQUIREMENTS:
 - Tailwind CSS v4
 - shadcn/ui components (npx shadcn@latest init, then add needed components)
 - Dark theme ONLY — background #0d1117, no light mode
-- Lemon Squeezy checkout overlay for payments
+- Stripe Payment Link for payments (hosted checkout — use the URL directly as the Buy button href)
 - Landing page that converts: hero, problem, solution, pricing, FAQ
 - The actual tool/feature behind a paywall (cookie-based access after purchase)
 - Mobile responsive
@@ -55,9 +57,13 @@ REQUIREMENTS:
   to package.json dependencies and re-run npm install + npm run build until it passes.
 
 ENVIRONMENT VARIABLES (create .env.example):
-- NEXT_PUBLIC_LEMON_SQUEEZY_STORE_ID
-- NEXT_PUBLIC_LEMON_SQUEEZY_PRODUCT_ID
-- LEMON_SQUEEZY_WEBHOOK_SECRET
+- NEXT_PUBLIC_STRIPE_PAYMENT_LINK  (full URL, e.g. https://buy.stripe.com/test_XXX)
+- NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY  (pk_test_... or pk_live_...)
+- STRIPE_WEBHOOK_SECRET  (set when webhook is wired)
+
+BUY BUTTON RULE: the Buy button's href MUST be `process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK`
+used as-is — do NOT construct URLs from a product ID, do NOT prepend any base URL,
+do NOT wrap it in an embed iframe. The link opens Stripe's hosted checkout directly.
 
 After creating all files:
 1. Run: npm install
@@ -67,8 +73,3 @@ After creating all files:
 
 Do NOT use placeholder text. Write real, helpful content for the landing page
 and the tool itself. The tool should actually work and provide value.
-
-
-PREVIOUS ATTEMPT FAILED WITH:
-Codex timed out after 600s
-Please fix the above errors and regenerate.

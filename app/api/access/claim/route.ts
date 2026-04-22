@@ -1,51 +1,44 @@
-import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { issueAccessToken } from "@/lib/access";
-import { ACCESS_COOKIE_NAME } from "@/lib/constants";
-import { hasActivePayment } from "@/lib/database";
+import { ACCESS_COOKIE_NAME, ACCESS_MAX_AGE_SECONDS, makeAccessCookieValue } from "@/lib/auth";
+import { findPurchaseByEmail } from "@/lib/database";
 
 const claimSchema = z.object({
-  email: z.string().trim().toLowerCase().email("Enter the same email used during checkout."),
+  email: z.string().email()
 });
 
-export async function POST(request: NextRequest) {
-  let body: z.infer<typeof claimSchema>;
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null);
+  const parsed = claimSchema.safeParse(body);
 
-  try {
-    body = claimSchema.parse(await request.json());
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json({ error: error.issues[0]?.message ?? "Invalid request." }, { status: 400 });
-    }
-
-    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+  if (!parsed.success) {
+    return NextResponse.json({ error: "A valid email is required." }, { status: 400 });
   }
 
-  const paid = await hasActivePayment(body.email);
+  const normalizedEmail = parsed.data.email.trim().toLowerCase();
+  const purchase = await findPurchaseByEmail(normalizedEmail);
 
-  if (!paid) {
+  if (!purchase) {
     return NextResponse.json(
       {
-        error:
-          "No completed payment found for that email yet. If you just paid, wait 30 seconds for Stripe webhook sync.",
+        error: "No completed purchase found for this email yet. If you just paid, wait 10-20 seconds for webhook sync."
       },
-      { status: 404 },
+      { status: 403 }
     );
   }
 
-  const token = issueAccessToken(body.email);
-  const response = NextResponse.json({ message: "Access unlocked. Redirecting to dashboard." });
-
-  response.cookies.set({
+  const cookieStore = await cookies();
+  cookieStore.set({
     name: ACCESS_COOKIE_NAME,
-    value: token,
+    value: makeAccessCookieValue(normalizedEmail),
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
+    maxAge: ACCESS_MAX_AGE_SECONDS,
+    path: "/"
   });
 
-  return response;
+  return NextResponse.json({ ok: true });
 }

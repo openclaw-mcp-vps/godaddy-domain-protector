@@ -1,62 +1,58 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono, Space_Grotesk } from "next/font/google";
+import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
-  variable: "--font-space-grotesk",
   subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap"
 });
 
-const jetbrainsMono = JetBrains_Mono({
-  variable: "--font-jetbrains-mono",
+const ibmPlexMono = IBM_Plex_Mono({
   subsets: ["latin"],
+  variable: "--font-mono",
+  weight: ["400", "500", "600"],
+  display: "swap"
 });
-
-const baseUrl = "https://godaddy-domain-protector.com";
 
 export const metadata: Metadata = {
-  metadataBase: new URL(baseUrl),
+  metadataBase: new URL("https://godaddy-domain-protector.vercel.app"),
   title: {
-    default: "GoDaddy Domain Protector | Anonymous Domain Availability Checks",
-    template: "%s | GoDaddy Domain Protector",
+    default: "GoDaddy Domain Protector",
+    template: "%s | GoDaddy Domain Protector"
   },
   description:
-    "Check domain availability through rotating proxy lookups so registrars cannot track and snipe your best domain ideas.",
-  keywords: [
-    "domain availability checker",
-    "anonymous WHOIS lookup",
-    "domain sniping prevention",
-    "startup domain research",
-    "domain intelligence",
-  ],
+    "Check domain availability anonymously using rotating lookup routes so registrars cannot weaponize your search intent.",
   openGraph: {
-    type: "website",
-    url: baseUrl,
     title: "GoDaddy Domain Protector",
     description:
-      "Anonymous domain checks through rotating proxy infrastructure to prevent registrar sniping.",
-    siteName: "GoDaddy Domain Protector",
+      "Anonymous domain availability checks with rotating providers and egress routes to reduce registrar sniping risk.",
+    type: "website",
+    url: "https://godaddy-domain-protector.vercel.app",
+    siteName: "GoDaddy Domain Protector"
   },
   twitter: {
     card: "summary_large_image",
     title: "GoDaddy Domain Protector",
-    description:
-      "Check domain availability anonymously and stop registrars from preempting your search intent.",
+    description: "Protect domain research from registrar sniping with anonymous lookup routing."
   },
   robots: {
     index: true,
-    follow: true,
-  },
+    follow: true
+  }
 };
 
 export default function RootLayout({
-  children,
+  children
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`dark ${spaceGrotesk.variable} ${jetbrainsMono.variable}`}>
-      <body>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} bg-[var(--background)] text-[var(--foreground)] antialiased`}>
+        {children}
+      </body>
     </html>
   );
 }

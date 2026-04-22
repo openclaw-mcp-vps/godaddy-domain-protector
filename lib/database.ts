@@ -1,123 +1,115 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
-import path from "path";
+import fs from "node:fs/promises";
+import path from "node:path";
 
-import { Pool } from "pg";
+import { z } from "zod";
 
-interface PaymentInsert {
-  email: string;
-  eventId?: string;
-  payload: unknown;
-}
+const purchaseSchema = z.object({
+  email: z.string().email(),
+  source: z.string(),
+  eventId: z.string(),
+  purchasedAt: z.string()
+});
 
-const databaseUrl = process.env.DATABASE_URL;
-const pool = databaseUrl
-  ? new Pool({
-      connectionString: databaseUrl,
-      ssl: databaseUrl.includes("localhost") ? undefined : { rejectUnauthorized: false },
-    })
-  : null;
+const lookupSchema = z.object({
+  id: z.string(),
+  ownerEmail: z.string().email().optional(),
+  checkedAt: z.string(),
+  domains: z.array(z.string()),
+  availableCount: z.number().int().nonnegative(),
+  takenCount: z.number().int().nonnegative()
+});
 
-let tablesInitialized = false;
-const fallbackPath = path.join(process.cwd(), ".data", "payments.json");
-const fallbackCache = new Set<string>();
+const storeSchema = z.object({
+  purchases: z.array(purchaseSchema),
+  lookups: z.array(lookupSchema)
+});
 
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
-}
+type PurchaseRecord = z.infer<typeof purchaseSchema>;
+type LookupRecord = z.infer<typeof lookupSchema>;
+type Store = z.infer<typeof storeSchema>;
 
-async function ensureTables() {
-  if (!pool || tablesInitialized) {
-    return;
-  }
+const DATA_DIR = path.join(process.cwd(), ".data");
+const DATA_FILE = path.join(DATA_DIR, "store.json");
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS customer_payments (
-      id BIGSERIAL PRIMARY KEY,
-      email TEXT NOT NULL,
-      event_id TEXT UNIQUE,
-      payload JSONB NOT NULL,
-      paid_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (email)
-    );
-  `);
+let writeChain: Promise<unknown> = Promise.resolve();
 
-  tablesInitialized = true;
-}
+async function ensureStoreFile(): Promise<void> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
 
-async function loadFallbackPayments() {
   try {
-    const content = await readFile(fallbackPath, "utf8");
-    const parsed = JSON.parse(content) as { payments: string[] };
-
-    for (const email of parsed.payments) {
-      fallbackCache.add(normalizeEmail(email));
-    }
+    await fs.access(DATA_FILE);
   } catch {
-    await mkdir(path.dirname(fallbackPath), { recursive: true });
-    await writeFile(fallbackPath, JSON.stringify({ payments: [] }, null, 2), "utf8");
+    const initialStore: Store = { purchases: [], lookups: [] };
+    await fs.writeFile(DATA_FILE, JSON.stringify(initialStore, null, 2), "utf8");
   }
 }
 
-let fallbackLoaded = false;
+async function readStore(): Promise<Store> {
+  await ensureStoreFile();
+  const raw = await fs.readFile(DATA_FILE, "utf8");
 
-async function ensureFallbackLoaded() {
-  if (fallbackLoaded) {
-    return;
+  try {
+    const parsed = JSON.parse(raw);
+    return storeSchema.parse(parsed);
+  } catch {
+    const recovered: Store = { purchases: [], lookups: [] };
+    await fs.writeFile(DATA_FILE, JSON.stringify(recovered, null, 2), "utf8");
+    return recovered;
   }
-
-  await loadFallbackPayments();
-  fallbackLoaded = true;
 }
 
-async function persistFallback() {
-  await mkdir(path.dirname(fallbackPath), { recursive: true });
-  await writeFile(
-    fallbackPath,
-    JSON.stringify({ payments: [...fallbackCache].sort() }, null, 2),
-    "utf8",
-  );
+async function writeStore(nextStore: Store): Promise<void> {
+  await ensureStoreFile();
+  await fs.writeFile(DATA_FILE, JSON.stringify(nextStore, null, 2), "utf8");
 }
 
-export async function storeSuccessfulPayment(input: PaymentInsert) {
-  const email = normalizeEmail(input.email);
+async function updateStore(mutator: (store: Store) => Store | Promise<Store>): Promise<Store> {
+  const run = async (): Promise<Store> => {
+    const current = await readStore();
+    const updated = await mutator(current);
+    await writeStore(updated);
+    return updated;
+  };
 
-  if (pool) {
-    await ensureTables();
-    await pool.query(
-      `
-      INSERT INTO customer_payments (email, event_id, payload)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (email)
-      DO UPDATE SET
-        payload = EXCLUDED.payload,
-        event_id = COALESCE(EXCLUDED.event_id, customer_payments.event_id),
-        paid_at = NOW();
-      `,
-      [email, input.eventId ?? null, JSON.stringify(input.payload)],
-    );
-
-    return;
-  }
-
-  await ensureFallbackLoaded();
-  fallbackCache.add(email);
-  await persistFallback();
+  writeChain = writeChain.then(run, run);
+  return writeChain as Promise<Store>;
 }
 
-export async function hasActivePayment(email: string) {
-  const normalized = normalizeEmail(email);
+export async function findPurchaseByEmail(email: string): Promise<PurchaseRecord | null> {
+  const normalized = email.trim().toLowerCase();
+  const store = await readStore();
+  return store.purchases.find((purchase) => purchase.email === normalized) ?? null;
+}
 
-  if (pool) {
-    await ensureTables();
-    const result = await pool.query<{ exists: boolean }>(
-      "SELECT EXISTS(SELECT 1 FROM customer_payments WHERE email = $1) AS exists",
-      [normalized],
-    );
+export async function hasProcessedWebhookEvent(eventId: string): Promise<boolean> {
+  const store = await readStore();
+  return store.purchases.some((purchase) => purchase.eventId === eventId);
+}
 
-    return Boolean(result.rows[0]?.exists);
-  }
+export async function upsertPurchase(record: PurchaseRecord): Promise<void> {
+  const normalized: PurchaseRecord = {
+    ...record,
+    email: record.email.trim().toLowerCase()
+  };
 
-  await ensureFallbackLoaded();
-  return fallbackCache.has(normalized);
+  await updateStore((store) => {
+    const existingIndex = store.purchases.findIndex((purchase) => purchase.email === normalized.email);
+
+    if (existingIndex >= 0) {
+      store.purchases[existingIndex] = normalized;
+    } else {
+      store.purchases.push(normalized);
+    }
+
+    return store;
+  });
+}
+
+export async function addLookupRecord(record: LookupRecord): Promise<void> {
+  await updateStore((store) => {
+    const capped = store.lookups.slice(-199);
+    capped.push(record);
+    store.lookups = capped;
+    return store;
+  });
 }

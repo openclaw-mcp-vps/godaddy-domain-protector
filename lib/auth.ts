@@ -1,47 +1,86 @@
-import crypto from "crypto";
+import crypto from "node:crypto";
 
-const COOKIE_NAME = "gdp_access";
-const ACCESS_DAYS = 30;
+import type { NextRequest } from "next/server";
 
-function getSecret() {
-  return process.env.ACCESS_TOKEN_SECRET || process.env.LEMON_SQUEEZY_WEBHOOK_SECRET || "dev-secret-change-me";
+export const ACCESS_COOKIE_NAME = "gdp_access";
+export const ACCESS_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
+export interface AccessTokenPayload {
+  email: string;
+  grantedAt: number;
+  exp: number;
 }
 
-export function createAccessToken(orderId: string, email: string) {
-  const expiresAt = Date.now() + ACCESS_DAYS * 24 * 60 * 60 * 1000;
-  const payload = `${orderId}:${email.toLowerCase()}:${expiresAt}`;
-  const signature = crypto.createHmac("sha256", getSecret()).update(payload).digest("hex");
-  return `${payload}:${signature}`;
+function getAuthSecret(): string {
+  return process.env.ACCESS_TOKEN_SECRET || process.env.STRIPE_WEBHOOK_SECRET || "dev-insecure-change-me";
 }
 
-export function verifyAccessToken(token: string | undefined | null) {
-  if (!token) return false;
-
-  const [orderId, email, expiresAtRaw, signature] = token.split(":");
-  if (!orderId || !email || !expiresAtRaw || !signature) return false;
-
-  const payload = `${orderId}:${email.toLowerCase()}:${expiresAtRaw}`;
-  const expected = crypto.createHmac("sha256", getSecret()).update(payload).digest("hex");
-  if (expected !== signature) return false;
-
-  const expiresAt = Number(expiresAtRaw);
-  if (Number.isNaN(expiresAt) || Date.now() > expiresAt) return false;
-
-  return true;
+function toBase64Url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
 }
 
-export function buildAccessCookie(token: string) {
-  return {
-    name: COOKIE_NAME,
-    value: token,
-    options: {
-      httpOnly: true,
-      sameSite: "lax" as const,
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: ACCESS_DAYS * 24 * 60 * 60
-    }
+function fromBase64Url(value: string): string {
+  return Buffer.from(value, "base64url").toString("utf8");
+}
+
+function sign(value: string): string {
+  return crypto.createHmac("sha256", getAuthSecret()).update(value).digest("base64url");
+}
+
+export function createAccessToken(email: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: AccessTokenPayload = {
+    email: email.trim().toLowerCase(),
+    grantedAt: now,
+    exp: now + ACCESS_MAX_AGE_SECONDS
   };
+
+  const encodedPayload = toBase64Url(JSON.stringify(payload));
+  const signature = sign(encodedPayload);
+  return `${encodedPayload}.${signature}`;
 }
 
-export const accessCookieName = COOKIE_NAME;
+export function verifyAccessToken(token: string | undefined | null): AccessTokenPayload | null {
+  if (!token) {
+    return null;
+  }
+
+  const [encodedPayload, signature] = token.split(".");
+
+  if (!encodedPayload || !signature) {
+    return null;
+  }
+
+  const expected = sign(encodedPayload);
+  const candidateBuffer = Buffer.from(signature, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+
+  if (candidateBuffer.length !== expectedBuffer.length) {
+    return null;
+  }
+
+  if (!crypto.timingSafeEqual(candidateBuffer, expectedBuffer)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(fromBase64Url(encodedPayload)) as AccessTokenPayload;
+
+    if (!parsed.email || typeof parsed.exp !== "number" || parsed.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function getAccessFromRequest(request: NextRequest): AccessTokenPayload | null {
+  const token = request.cookies.get(ACCESS_COOKIE_NAME)?.value;
+  return verifyAccessToken(token);
+}
+
+export function makeAccessCookieValue(email: string): string {
+  return createAccessToken(email);
+}

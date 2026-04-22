@@ -1,44 +1,65 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
-import {
-  extractPayerEmail,
-  isRecognizedPaidEvent,
-  type StripeEventEnvelope,
-  verifyStripeWebhookSignature,
-} from "@/lib/lemonsqueezy";
-import { storeSuccessfulPayment } from "@/lib/database";
+import { hasProcessedWebhookEvent, upsertPurchase } from "@/lib/database";
+import { parseWebhookEvent, verifyStripeWebhookSignature } from "@/lib/lemonsqueezy";
 
-export async function POST(request: NextRequest) {
+function extractCustomerEmail(eventType: string, object: Record<string, unknown>): string | null {
+  if (eventType === "checkout.session.completed") {
+    const customerEmail = typeof object.customer_email === "string" ? object.customer_email : null;
+    if (customerEmail) {
+      return customerEmail;
+    }
+
+    const customerDetails = object.customer_details as { email?: unknown } | undefined;
+    if (customerDetails && typeof customerDetails.email === "string") {
+      return customerDetails.email;
+    }
+  }
+
+  if (eventType === "payment_intent.succeeded") {
+    const receiptEmail = typeof object.receipt_email === "string" ? object.receipt_email : null;
+    if (receiptEmail) {
+      return receiptEmail;
+    }
+  }
+
+  return null;
+}
+
+export async function POST(request: Request) {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    return NextResponse.json({ error: "Webhook secret is not configured." }, { status: 500 });
+  }
+
   const rawBody = await request.text();
-  const stripeSignature = request.headers.get("stripe-signature");
+  const signature = request.headers.get("stripe-signature");
 
-  if (!verifyStripeWebhookSignature(rawBody, stripeSignature)) {
+  const isVerified = verifyStripeWebhookSignature(rawBody, signature, secret);
+  if (!isVerified) {
     return NextResponse.json({ error: "Invalid webhook signature." }, { status: 400 });
   }
 
-  let event: StripeEventEnvelope;
-
-  try {
-    event = JSON.parse(rawBody) as StripeEventEnvelope;
-  } catch {
-    return NextResponse.json({ error: "Malformed webhook payload." }, { status: 400 });
+  const event = parseWebhookEvent(rawBody);
+  if (!event) {
+    return NextResponse.json({ error: "Invalid event payload." }, { status: 400 });
   }
 
-  if (!isRecognizedPaidEvent(event.type)) {
-    return NextResponse.json({ received: true, ignored: true });
+  const alreadyProcessed = await hasProcessedWebhookEvent(event.id);
+  if (alreadyProcessed) {
+    return NextResponse.json({ ok: true, duplicate: true });
   }
 
-  const email = extractPayerEmail(event);
+  const email = extractCustomerEmail(event.type, event.data.object);
 
-  if (!email) {
-    return NextResponse.json({ error: "Paid event did not contain customer email." }, { status: 422 });
+  if (email) {
+    await upsertPurchase({
+      email,
+      source: "stripe",
+      eventId: event.id,
+      purchasedAt: new Date().toISOString()
+    });
   }
 
-  await storeSuccessfulPayment({
-    email,
-    eventId: event.id,
-    payload: event,
-  });
-
-  return NextResponse.json({ received: true, email });
+  return NextResponse.json({ ok: true });
 }

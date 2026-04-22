@@ -1,187 +1,177 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import { Download, Shield, ShieldAlert } from "lucide-react";
 
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Loader2, ShieldAlert, ShieldCheck } from "lucide-react";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
-
-import { DomainResults } from "@/components/domain-results";
+import { ResultsTable } from "@/components/results-table";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DomainCheckResult } from "@/lib/domain-checker";
+import { Textarea } from "@/components/ui/textarea";
+import type { DomainLookupResult } from "@/lib/domain-proxy";
 
-const schema = z.object({
-  domains: z
-    .string()
-    .min(3, "Enter at least one domain.")
-    .refine((value) => value.split(/\s|,|\n/).filter(Boolean).length <= 50, "Maximum 50 domains per request.")
-});
+function parseDomains(input: string): string[] {
+  return Array.from(
+    new Set(
+      input
+        .split(/[\n,\s]+/)
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+}
 
-type FormValues = z.infer<typeof schema>;
+function toCsv(results: DomainLookupResult[]): string {
+  const header = "domain,status,confidence,provider,route,response_ms,reason";
+  const rows = results.map((result) => {
+    const values = [
+      result.domain,
+      result.status,
+      result.confidence.toFixed(2),
+      result.providerName,
+      result.egressRoute,
+      String(result.responseMs),
+      result.reason.replaceAll('"', '""')
+    ];
 
-export function DomainChecker() {
-  const [results, setResults] = useState<DomainCheckResult[]>([]);
-  const [error, setError] = useState<string>("");
-  const [watchDomains, setWatchDomains] = useState<string[]>([]);
-  const [alerts, setAlerts] = useState<string[]>([]);
-  const seenAlerts = useRef<Set<string>>(new Set());
-
-  const form = useForm<FormValues>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      domains: ""
-    }
+    return values.map((value) => `"${value}"`).join(",");
   });
 
-  const isLoading = form.formState.isSubmitting;
+  return [header, ...rows].join("\n");
+}
 
-  async function onSubmit(values: FormValues) {
-    setError("");
+export function DomainChecker() {
+  const [domainText, setDomainText] = useState("");
+  const [results, setResults] = useState<DomainLookupResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-    const domains = values.domains
-      .split(/\s|,|\n/)
-      .map((item) => item.trim())
-      .filter(Boolean);
+  const summary = useMemo(() => {
+    const available = results.filter((entry) => entry.status === "available").length;
+    const taken = results.filter((entry) => entry.status === "taken").length;
+    const unknown = results.filter((entry) => entry.status === "unknown").length;
 
-    const response = await fetch("/api/check-domains", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ domains })
-    });
+    return { available, taken, unknown };
+  }, [results]);
 
-    const payload = await response.json();
+  async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
 
-    if (!response.ok) {
-      setError(payload.error || "Failed to check domains.");
+    const domains = parseDomains(domainText);
+    if (domains.length === 0) {
+      setError("Enter at least one domain to check.");
       return;
     }
 
-    setResults(payload.results);
-  }
+    setLoading(true);
 
-  function parseDomains(raw: string) {
-    return raw
-      .split(/\s|,|\n/)
-      .map((item) => item.trim().toLowerCase())
-      .filter(Boolean)
-      .slice(0, 50);
-  }
-
-  function startAlerts() {
-    const parsed = parseDomains(form.getValues("domains"));
-    if (parsed.length === 0) {
-      setError("Add domains before enabling alerts.");
-      return;
-    }
-
-    setWatchDomains(parsed);
-    setError("");
-
-    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => undefined);
-    }
-  }
-
-  useEffect(() => {
-    if (watchDomains.length === 0) return;
-
-    const runPoll = async () => {
+    try {
       const response = await fetch("/api/check-domains", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domains: watchDomains })
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ domains })
       });
 
+      if (response.status === 402) {
+        setError("Access locked. Activate your account from the pricing page first.");
+        setResults([]);
+        return;
+      }
+
       if (!response.ok) {
-        return;
+        throw new Error("Failed to check domains.");
       }
 
-      const payload = await response.json();
-      const polled: DomainCheckResult[] = payload.results || [];
-      const newlyAvailable = polled.filter((item) => item.overall === "available" && !seenAlerts.current.has(item.domain));
+      const data = (await response.json()) as { results: DomainLookupResult[] };
+      setResults(data.results);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Request failed.");
+      setResults([]);
+    } finally {
+      setLoading(false);
+    }
+  }
 
-      if (newlyAvailable.length === 0) {
-        return;
-      }
+  function exportCsv() {
+    if (results.length === 0) {
+      return;
+    }
 
-      newlyAvailable.forEach((item) => seenAlerts.current.add(item.domain));
-      setAlerts((current) => [
-        ...newlyAvailable.map((item) => `${item.domain} is now marked available (${item.confidence}% confidence).`),
-        ...current
-      ]);
-
-      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-        newlyAvailable.forEach((item) => {
-          new Notification("Domain alert", {
-            body: `${item.domain} now appears available.`
-          });
-        });
-      }
-    };
-
-    void runPoll();
-    const id = window.setInterval(() => void runPoll(), 300000);
-    return () => window.clearInterval(id);
-  }, [watchDomains]);
+    const csv = toCsv(results);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `domain-results-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="space-y-6">
-      <Card className="border-slate-800 bg-slate-900/80">
+      <Card>
         <CardHeader>
-          <CardTitle className="text-2xl">Private batch domain check</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-[var(--brand)]" />
+            Anonymous Domain Availability Check
+          </CardTitle>
           <CardDescription>
-            Queries DNS, RDAP, GoDaddy, and Namecheap concurrently from server-side requests with optional rotating proxies.
+            Lookups are distributed across rotating providers and egress routes to reduce registrar tracking risk.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            <textarea
-              className="min-h-40 w-full rounded-md border border-slate-700 bg-slate-950 p-3 text-sm text-slate-50 placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-              placeholder="mybrand.com\nmybrand.ai\nmybrand.io"
-              {...form.register("domains")}
+          <form onSubmit={onSubmit} className="space-y-4">
+            <Textarea
+              value={domainText}
+              onChange={(event) => setDomainText(event.target.value)}
+              placeholder="Try: launchpilot.com\nlaunchpilot.io\nlaunchpilot.ai"
+              className="min-h-36"
             />
-            {form.formState.errors.domains && <p className="text-sm text-rose-300">{form.formState.errors.domains.message}</p>}
-            {error && (
-              <p className="flex items-center gap-2 text-sm text-rose-300">
-                <ShieldAlert className="h-4 w-4" />
-                {error}
-              </p>
-            )}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button type="submit" disabled={isLoading}>
-                {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
-                Check domains now
+            <div className="flex flex-wrap items-center gap-3">
+              <Button type="submit" disabled={loading}>
+                {loading ? "Checking domains..." : "Check availability"}
               </Button>
-              <Button type="button" variant="outline" onClick={startAlerts}>
-                Enable availability alerts
+              <Button type="button" variant="outline" onClick={exportCsv} disabled={results.length === 0}>
+                <Download className="mr-1 h-4 w-4" />
+                Export CSV
               </Button>
-              <p className="text-xs text-slate-400">Use commas, spaces, or new lines. Up to 50 domains per run.</p>
             </div>
           </form>
+          {error ? (
+            <div className="mt-4 flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+              <ShieldAlert className="h-4 w-4" />
+              <span>{error}</span>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
-      {alerts.length > 0 && (
-        <Card className="border-emerald-700/40 bg-emerald-950/20">
-          <CardHeader>
-            <CardTitle className="text-lg">Availability Alerts</CardTitle>
-            <CardDescription>Watchlist checks run every 5 minutes while this page is open.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {alerts.slice(0, 8).map((message) => (
-              <p key={message} className="text-sm text-emerald-200">
-                {message}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+      {results.length > 0 ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-sm text-[var(--muted)]">Available</p>
+              <p className="text-2xl font-semibold text-emerald-300">{summary.available}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-sm text-[var(--muted)]">Taken</p>
+              <p className="text-2xl font-semibold text-red-300">{summary.taken}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-sm text-[var(--muted)]">Uncertain</p>
+              <p className="text-2xl font-semibold text-amber-300">{summary.unknown}</p>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
 
-      <DomainResults results={results} />
+      <ResultsTable results={results} />
     </div>
   );
 }
